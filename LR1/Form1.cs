@@ -242,13 +242,12 @@ namespace IoTRobotWorldUDPServer
                 points.Add(new PointF(x, y));
             }
 
-            // Кластеризация K-means
             if (points.Count > 0)
             {
                 var detectedWalls = new List<WallInfo>();
 
                 int clusterCount = Math.Min((int)numericUpDownClusters.Value, points.Count);
-                clusterCount = Math.Max(1, clusterCount); // Не менее 1 кластера
+                clusterCount = Math.Max(1, clusterCount);
 
                 double[][] inputs = points.Select(p => new[] { (double)p.X, (double)p.Y }).ToArray();
                 KMeans kmeans = new KMeans(clusterCount);
@@ -258,7 +257,7 @@ namespace IoTRobotWorldUDPServer
                 // Сбор информации о кластерах
                 var clusterInfos = new List<ClusterInfo>();
                 var rand = new Random();
-                
+
                 for (int i = 0; i < clusterCount; i++)
                 {
                     var info = new ClusterInfo
@@ -272,25 +271,76 @@ namespace IoTRobotWorldUDPServer
 
                     if (!info.Indices.Any()) continue;
 
-                    // Расчет характеристик кластера
                     var clusterPoints = inputs.Get(info.Indices);
-                    info.Centroid = clusterPoints.Mean(0);
 
-                    // Преобразование матрицы ковариации
-                    double[,] covariance = new double[2, 2];
+                    // Анализ формы кластера ДО вычисления центроида
                     var tempCov = clusterPoints.Covariance();
+                    double[,] covariance = new double[2, 2];
                     for (int x = 0; x < 2; x++)
                         for (int y = 0; y < 2; y++)
                             covariance[x, y] = tempCov[x][y];
 
+                    var svd = new SingularValueDecomposition(covariance);
+                    info.IsLinear = svd.Diagonal[0] > svd.Diagonal[1] * 3;
+
+                    // Если кластер линейный (возможная стена), вычисляем центроид по-другому
+                    if (info.IsLinear && clusterPoints.Length > 10)
+                    {
+                        // Находим линию стены через метод наименьших квадратов
+                        double[] xValues = clusterPoints.GetColumn(0);
+                        double[] yValues = clusterPoints.GetColumn(1);
+
+                        // Линейная регрессия y = a*x + b
+                        double xMean = xValues.Mean();
+                        double yMean = yValues.Mean();
+
+                        double covarianceXY = 0.0;
+                        double varianceX = 0.0;
+
+                        for (int j = 0; j < xValues.Length; j++)
+                        {
+                            covarianceXY += (xValues[j] - xMean) * (yValues[j] - yMean);
+                            varianceX += Math.Pow(xValues[j] - xMean, 2);
+                        }
+
+                        double a = covarianceXY / varianceX; // Наклон
+                        double b = yMean - a * xMean;       // Пересечение
+
+                        // Находим проекцию среднего на линию стены
+                        // Это будет наш новый "центроид" на стене
+                        double centroidX = xMean;
+                        double centroidY = a * centroidX + b;
+
+                        info.Centroid = new[] { centroidX, centroidY };
+
+                        // Сохраняем параметры стены для визуализации
+                        double[] direction = svd.RightSingularVectors.GetColumn(0);
+                        double[] projections = clusterPoints.Dot(direction);
+                        int minIndex = projections.ArgMin();
+                        int maxIndex = projections.ArgMax();
+
+                        PointF startPoint = points[info.Indices[minIndex]];
+                        PointF endPoint = points[info.Indices[maxIndex]];
+
+                        detectedWalls.Add(new WallInfo
+                        {
+                            StartPoint = startPoint,
+                            EndPoint = endPoint,
+                            Length = Math.Sqrt(Math.Pow(endPoint.X - startPoint.X, 2) +
+                                    Math.Pow(endPoint.Y - startPoint.Y, 2)),
+                            Angle = Math.Atan2(endPoint.Y - startPoint.Y, endPoint.X - startPoint.X) * 180 / Math.PI,
+                            Confidence = Math.Min(1.0, info.Indices.Count / 50.0)
+                        });
+                    }
+                    else
+                    {
+                        // Для нелинейных кластеров используем обычный центроид
+                        info.Centroid = clusterPoints.Mean(0);
+                    }
+
                     info.CovarianceMatrix = covariance;
                     double[] stdDev = clusterPoints.StandardDeviation();
-
                     info.Density = clusterPoints.Length / (stdDev[0] + stdDev[1]);
-
-                    // Анализ формы кластера
-                    var svd = new SingularValueDecomposition(info.CovarianceMatrix);
-                    info.IsLinear = svd.Diagonal[0] > svd.Diagonal[1] * 3;
 
                     clusterInfos.Add(info);
                     listBox3.Items.Clear();
@@ -315,49 +365,8 @@ namespace IoTRobotWorldUDPServer
                     listBox3.Items.Add($"Центроид кластера (N={clusterPoints.Length}):");
                     listBox3.Items.Add($"  X = {centroid[0]:F4}");
                     listBox3.Items.Add($"  Y = {centroid[1]:F4}");
-
+                    // ... (остальная часть вывода информации в listBox3)
                 }
-                foreach (var cluster in clusterInfos)
-                {
-                    // Проверяем, может ли кластер быть стеной
-                    if (cluster.IsLinear && cluster.Indices.Count > 10) // 10 - минимальное количество точек для стены
-                    {
-                        var clusterPoints = inputs.Get(cluster.Indices);
-
-                        // Вычисляем главные компоненты с помощью SVD
-                        var svd = new SingularValueDecomposition(cluster.CovarianceMatrix);
-                        double[] direction = svd.RightSingularVectors.GetColumn(0); // Главное направление
-
-                        // Находим крайние точки вдоль главного направления
-                        double[] projections = clusterPoints.Dot(direction);
-                        int minIndex = projections.ArgMin();
-                        int maxIndex = projections.ArgMax();
-
-                        PointF startPoint = points[cluster.Indices[minIndex]];
-                        PointF endPoint = points[cluster.Indices[maxIndex]];
-
-                        // Рассчитываем длину "стены"
-                        double length = Math.Sqrt(Math.Pow(endPoint.X - startPoint.X, 2) +
-                                       Math.Pow(endPoint.Y - startPoint.Y, 2));
-
-                        // Рассчитываем угол наклона (в градусах)
-                        double angle = Math.Atan2(endPoint.Y - startPoint.Y, endPoint.X - startPoint.X) * 180 / Math.PI;
-
-                        // Рассчитываем "уверенность", что это стена
-                        double confidence = Math.Min(1.0, cluster.Indices.Count / 50.0); // Нормализуем к 0-1
-
-                        detectedWalls.Add(new WallInfo
-                        {
-                            StartPoint = startPoint,
-                            EndPoint = endPoint,
-                            Length = length,
-                            Angle = angle,
-                            Confidence = confidence
-                        });
-                    }
-                }
-
-                // Отрисовка обнаруженных стен
                 if (checkBox2.Checked)
                 {
                     listBox4.Items.Clear();
@@ -368,8 +377,8 @@ namespace IoTRobotWorldUDPServer
                         listBox4.Items.Add("");
                     }
                 }
-               
-                // Отрисовка кластеров
+
+                // Отрисовка
                 using (Graphics g = Graphics.FromImage(bitmap))
                 {
                     // Отрисовка точек по кластерам
@@ -378,38 +387,41 @@ namespace IoTRobotWorldUDPServer
                         var brush = new SolidBrush(cluster.ClusterColor);
                         foreach (int idx in cluster.Indices)
                         {
-                            listBox3.BackColor = brush.Color;
-                            
                             g.FillEllipse(brush, (float)inputs[idx][0] - 3, (float)inputs[idx][1] - 3, 6, 6);
                         }
-                        if (checkBox2.Checked)
-                        {
-                            foreach (var wall in detectedWalls)
-                            {
-                                // Рисуем стену линией
-                                Pen wallPen = new Pen(Color.FromArgb((int)(wall.Confidence * 255), Color.Red), 1);
-                                g.DrawLine(wallPen, wall.StartPoint, wall.EndPoint);
 
-                                // Можно добавить подписи с информацией о стене
-                                PointF labelPos = new PointF((wall.StartPoint.X + wall.EndPoint.X) / 2,
-                                                            (wall.StartPoint.Y + wall.EndPoint.Y) / 2);
-                                g.DrawString($"L:{(int)wall.Length} A:{(int)wall.Angle}°",
-                                             new Font("Arial", 8), Brushes.Black, labelPos);
-                            }
-                        }
-                       
-                        // Отрисовка центроидов
-                        g.FillRectangle(Brushes.Red, (float)cluster.Centroid[0] - 2, (float)cluster.Centroid[1] - 2, 4, 4);
+                        // Отрисовка центроида - красный квадрат для стен, зелёный для не-стен
+                        Brush centroidBrush = cluster.IsLinear && cluster.Indices.Count > 10 ? Brushes.Red : Brushes.Green;
+                        g.FillRectangle(centroidBrush, (float)cluster.Centroid[0] - 3, (float)cluster.Centroid[1] - 3, 6, 6);
                     }
-                   
-                    // Отрисовка робота в центре
-                    g.FillEllipse(Brushes.Blue, bitmap.Width / 2 - 3, bitmap.Height / 2 - 3, 6, 6);
+
+                    // Отрисовка стен
+                    if (checkBox2.Checked)
+                    {
+                        foreach (var wall in detectedWalls)
+                        {
+                            Pen wallPen = new Pen(Color.FromArgb((int)(wall.Confidence * 255), Color.Red), 2);
+                            g.DrawLine(wallPen, wall.StartPoint, wall.EndPoint);
+
+                            // Подпись стены
+                            PointF labelPos = new PointF(
+                                (wall.StartPoint.X + wall.EndPoint.X) / 2,
+                                (wall.StartPoint.Y + wall.EndPoint.Y) / 2);
+                            g.DrawString($"L:{(int)wall.Length} A:{(int)wall.Angle}°",
+                                         new Font("Arial", 8), Brushes.Black, labelPos);
+                        }
+                    }
+
+                    // Робот в центре
+                    g.FillEllipse(Brushes.Blue, bitmap.Width / 2 - 5, bitmap.Height / 2 - 5, 10, 10);
                 }
+
+                // ... (вывод информации о стенах в listBox4)
             }
 
             pictureBox1.Image = bitmap;
         }
-  
+
         public async void timer1_Tick(object sender, EventArgs e)
         {
             if (Message != null)
