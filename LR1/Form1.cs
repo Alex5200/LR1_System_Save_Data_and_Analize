@@ -197,6 +197,7 @@ namespace IoTRobotWorldUDPServer
         }
         int angleStep = 0;
         int cluster = 50;
+        List<ClusterInfo> clusterInfos = null;
         public void CreateBitmap(string[] data)
         {
             // Инициализация компонентов
@@ -253,9 +254,9 @@ namespace IoTRobotWorldUDPServer
                 KMeans kmeans = new KMeans(clusterCount);
                 KMeansClusterCollection clusters = kmeans.Learn(inputs);
                 int[] labels = clusters.Decide(inputs);
-
+                clusters.Score(inputs);
                 // Сбор информации о кластерах
-                var clusterInfos = new List<ClusterInfo>();
+                clusterInfos = new List<ClusterInfo>();
                 var rand = new Random();
 
                 for (int i = 0; i < clusterCount; i++)
@@ -421,33 +422,40 @@ namespace IoTRobotWorldUDPServer
 
             pictureBox1.Image = bitmap;
         }
-
+        int ticks = 0;
+        string oldText = null;
         public async void timer1_Tick(object sender, EventArgs e)
         {
             if (Message != null)
             {
                 dataGridView1.DataSource = null;
                 Message = Message.Trim('>');
-
+                
                 if (Message != null)
                 {
+                    if (Frames == dataList.Count-1)
+                    {
+                        NextFrame.Enabled = false;
+                    }
+                    else
+                    {
+                        NextFrame.Enabled= true;
+                    }
                     bool write = true;
-                    string filePath = "saveDataLidar.txt";
-                    string text = Message + "\n";
-
+                   
+                    string text = Message ;
+                   
                     if (write)
                     {
-                        if (!File.Exists(filePath))
+                        ticks += 1;
+
+                      
+                        if (oldText != text)
                         {
-                            File.Create(filePath).Close();
+                            dataList.Add(text);
+                            oldText = text;
                         }
-                        dataList.Add(text);
-                        File.AppendAllText(filePath, text + Environment.NewLine);
-                        string[] lines = File.ReadAllLines(filePath);
-                        FramesLenght = lines.Length;
                         string[] data;
-
-
 
                         if (checkBox1.Checked)
                         {
@@ -455,30 +463,41 @@ namespace IoTRobotWorldUDPServer
                             CreateBitmap(data);
 
                         }
-
                         else
                         {
                             try
                             {
-                                if (dataList[Frames] != null)
+                                if (dataList[Frames] != null )
                                 {
-                                    data = GetLidarData(dataList[Frames]);
                                     FrameName.Text = "Frame: " + Frames;
-
-                                    CreateBitmap(data);
+                                    data = GetLidarData(dataList[Frames]);
+                                    if (clusterInfos == null)
+                                    {
+                                        CreateBitmap(data);
+                                    }
+                                }
+                                else
+                                {
+                                    MessageBox.Show("ERR");
                                 }
 
                             }
-                            catch
+                            catch(Exception ex)
                             {
+                                MessageBox.Show("ERR: " + ex.ToString());
+
                                 if (dataList[Frames] != null)
                                 {
                                     data = GetLidarData(dataList[0]);
                                     FrameName.Text = "Frame: " + Frames;
 
-                                    CreateBitmap(data);
+                                    if (clusterInfos == null)
+                                    {
+                                        CreateBitmap(data);
+                                    }
                                 }
                             }
+                            ticks = 0;
                         }
                     }
                 }
@@ -491,14 +510,16 @@ namespace IoTRobotWorldUDPServer
         {
             if (Frames >= 1)
             {
+                clusterInfos = null;
                 Frames -= 1;
             }
         }
 
         private void NextFrame_Click(object sender, EventArgs e)
         {
-            if (Frames < FramesLenght)
+            if (Frames != dataList.Count)
             {
+                clusterInfos = null;
                 Frames++;
             }
         }
@@ -513,17 +534,18 @@ namespace IoTRobotWorldUDPServer
 
         }
 
+        private void numericUpDownClusters_ValueChanged(object sender, EventArgs e)
+        {
+            clusterInfos = null;
+        }
+
         private void ClearFrame_Click(object sender, EventArgs e)
         {
-            string filePath = "saveDataLidar.txt";
-
+           
+            dataList = null;
+            clusterInfos = null;
             Frames = 0;
-            if (!File.Exists(filePath))
-            {
-                File.Create(filePath).Close();
-            }
-
-            File.WriteAllText(filePath, "");
+            
         }
 
 
@@ -610,11 +632,7 @@ namespace IoTRobotWorldUDPServer
                 }
                 catch (Exception ex)
                 {
-                    //if (ex.ToString() != oldError)
-                    //{
-                    //    this.Invoke(myDelegate, new object[] { ex.ToString() });
-                    //    oldError = ex.ToString();
-                    //}
+                    
                 }
             }
         }

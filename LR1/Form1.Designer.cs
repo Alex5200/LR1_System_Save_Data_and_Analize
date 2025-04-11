@@ -379,6 +379,7 @@ namespace IoTRobotWorldUDPServer
             0,
             0,
             0});
+            this.numericUpDownClusters.ValueChanged += new System.EventHandler(this.numericUpDownClusters_ValueChanged);
             // 
             // label7
             // 
